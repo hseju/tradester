@@ -19,7 +19,16 @@ from datetime import date
 from typing import Iterable
 
 from atlas.config import Settings
-from atlas.prices.base import AdapterError, FxAdapter, FxQuote, NewsAdapter, NewsItem, Quote, QuoteAdapter
+from atlas.prices.base import (
+    AdapterError,
+    CalendarItem,
+    FxAdapter,
+    FxQuote,
+    NewsAdapter,
+    NewsItem,
+    Quote,
+    QuoteAdapter,
+)
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +116,40 @@ class PriceService:
             except AdapterError as exc:
                 log.warning("%s news failed for %s: %s", adapter.name, ticker, exc)
         return []
+
+    def get_earnings(self, ticker: str, since: date, until: date) -> list[CalendarItem]:
+        for adapter in self.news_adapters:
+            fn = getattr(adapter, "get_earnings", None)
+            if fn is None or not adapter.supports(ticker):
+                continue
+            try:
+                return fn(ticker, since, until)
+            except AdapterError as exc:
+                log.warning("%s earnings failed for %s: %s", adapter.name, ticker, exc)
+        return []
+
+    def get_economic_events(self, country: str, since: date, until: date) -> list[CalendarItem]:
+        for adapter in self.news_adapters:
+            fn = getattr(adapter, "get_economic_events", None)
+            if fn is None:
+                continue
+            try:
+                return fn(country, since, until)
+            except AdapterError as exc:
+                log.warning("%s economic calendar failed: %s", adapter.name, exc)
+        return []
+
+    def get_policy_rate(self):
+        """(rate_pct, effective_date) from the Bank of Canada, or None."""
+        for adapter in self.fx_adapters:
+            fn = getattr(adapter, "get_policy_rate", None)
+            if fn is None:
+                continue
+            try:
+                return fn()
+            except AdapterError as exc:
+                log.warning("%s policy rate failed: %s", adapter.name, exc)
+        return None
 
     def get_fx(self, pair: str) -> FxQuote:
         errors = []

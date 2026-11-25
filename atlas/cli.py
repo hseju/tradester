@@ -280,6 +280,102 @@ def cmd_jobs(a) -> int:
     return 0
 
 
+def cmd_watch(a) -> int:
+    from atlas.market import normalize_ticker
+
+    with _app().services() as s:
+        if a.watch_cmd == "add":
+            s.bookkeeper.add_watch(normalize_ticker(a.ticker), a.note or "")
+        elif a.watch_cmd == "remove":
+            s.bookkeeper.remove_watch(normalize_ticker(a.ticker))
+        items = s.books.watchlist()
+    print("Watchlist:", ", ".join(w.ticker for w in items) or "(empty)")
+    return 0
+
+
+def cmd_assume(a) -> int:
+    with _app().services() as s:
+        if a.key:
+            if a.value is None:
+                print("give a value, e.g. `atlas assume us_equity 5.5`")
+                return 1
+            try:
+                s.bookkeeper.set_assumption(a.key, a.value, actor=USER)
+            except (KeyError, ValueError) as exc:
+                print(exc)
+                return 1
+        asm = s.books.assumptions()
+    print("Advisor assumptions (yours to set; not forecasts):")
+    for b, v in asm["expected_return_pct"].items():
+        print(f"  {b:<14} {v}% a year")
+    print(f"  min_trade_cad  ${asm['min_trade_cad']}")
+    return 0
+
+
+def cmd_goal(a) -> int:
+    with _app().services() as s:
+        try:
+            s.bookkeeper.set_goal_contribution(a.goal_id, a.monthly, actor=USER)
+        except KeyError as exc:
+            print(exc)
+            return 1
+    print(f"Goal {a.goal_id}: ${a.monthly}/month recorded. The Advisor uses it from its next run.")
+    return 0
+
+
+def cmd_events(a) -> int:
+    from atlas.chat.atlas import _fmt_events
+    from atlas.chat.tools import ToolBox
+
+    with _app().services() as s:
+        print(_fmt_events(json.loads(ToolBox(s).run("get_events", {"days": a.days}))))
+    return 0
+
+
+def cmd_plan(a) -> int:
+    from atlas.chat.atlas import _fmt_plans
+    from atlas.chat.tools import ToolBox
+    from atlas.trader import TradeRefused
+
+    with _app().services() as s:
+        if a.plan_cmd == "approve":
+            try:
+                legs = s.trader.approve_plan(a.id, actor=USER)
+            except TradeRefused as exc:
+                print(f"Refused: {exc}")
+                return 1
+            for p in legs:
+                o = s.session.get(models.Order, p.order_id) if p.order_id else None
+                fill = f" -> paper order {o.status}" + (f" at {o.fill_price}" if o and o.fill_price else "") if o else ""
+                print(f"  {p.side} {p.quantity} {p.ticker}: {p.status}{fill}")
+            return 0
+        if a.plan_cmd == "dismiss":
+            for p in s.trader.plan(a.id):
+                if p.status in {"proposed", "blocked", "approved"}:
+                    s.trader.dismiss(p.id, actor=USER, reason=a.reason or "")
+            print(f"Plan {a.id} dismissed.")
+            return 0
+        data = json.loads(ToolBox(s).run("get_plans", {"status": "all" if a.id else "open"}))
+        if a.id:
+            data["plans"] = [p for p in data["plans"] if p["plan_id"] == a.id]
+        print(_fmt_plans(data))
+    return 0
+
+
+def cmd_agent(a) -> int:
+    from atlas.jobs import job_advisor, job_market_watch
+
+    app = _app()
+    out = job_advisor(app) if a.cmd == "advisor" else job_market_watch(app, morning=a.morning)
+    with app.services() as s:
+        for rid in out["reports"]:
+            r = s.desk.get(rid)
+            print(f"[{r.agent} on {r.subject}, {r.stance.value}, {r.urgency.value}] {r.finding}")
+    if not out["reports"]:
+        print("Nothing new to report.")
+    return 0
+
+
 def cmd_serve(a) -> int:
     import uvicorn
 
@@ -319,9 +415,40 @@ def build_parser() -> argparse.ArgumentParser:
     x.set_defaults(fn=cmd_chat)
 
     sub.add_parser("prices", help="refresh prices and FX now").set_defaults(fn=cmd_prices)
-    x = sub.add_parser("news", help="fetch headlines for holdings now")
+    x = sub.add_parser("news", help="fetch and classify headlines now (Market Watch)")
     x.add_argument("--days", type=int, default=2)
     x.set_defaults(fn=cmd_news)
+
+    sub.add_parser("advisor", help="run the Advisor now: drift, goals, rebalance plan").set_defaults(fn=cmd_agent)
+    x = sub.add_parser("marketwatch", help="run Market Watch now")
+    x.add_argument("--morning", action="store_true", help="include the calendar / morning scan")
+    x.set_defaults(fn=cmd_agent)
+
+    x = sub.add_parser("plan", help="show, approve or dismiss multi-leg plans")
+    x.add_argument("plan_cmd", nargs="?", choices=["show", "approve", "dismiss"], default="show")
+    x.add_argument("id", nargs="?")
+    x.add_argument("--reason")
+    x.set_defaults(fn=cmd_plan)
+
+    x = sub.add_parser("watch", help="watchlist: names you don't own but want Market Watch to follow")
+    x.add_argument("watch_cmd", nargs="?", choices=["add", "remove", "list"], default="list")
+    x.add_argument("ticker", nargs="?")
+    x.add_argument("--note")
+    x.set_defaults(fn=cmd_watch)
+
+    x = sub.add_parser("assume", help="show or set the Advisor's return assumptions")
+    x.add_argument("key", nargs="?", help="a bucket (us_equity, fixed_income, ...) or min_trade_cad")
+    x.add_argument("value", nargs="?", type=_dec)
+    x.set_defaults(fn=cmd_assume)
+
+    x = sub.add_parser("goal", help="record a goal's monthly contribution")
+    x.add_argument("goal_id")
+    x.add_argument("monthly", type=_dec)
+    x.set_defaults(fn=cmd_goal)
+
+    x = sub.add_parser("events", help="upcoming earnings and economic releases")
+    x.add_argument("--days", type=int, default=14)
+    x.set_defaults(fn=cmd_events)
 
     x = sub.add_parser("rules", help="show or change Risk Officer rules")
     rs = x.add_subparsers(dest="rules_cmd")
@@ -376,7 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
     js = x.add_subparsers(dest="jobs_cmd", required=True)
     js.add_parser("start")
     y = js.add_parser("run")
-    y.add_argument("name", choices=["prices", "news", "daily_close"])
+    y.add_argument("name", choices=["prices", "market_watch", "morning_scan", "daily_close", "advisor"])
     x.set_defaults(fn=cmd_jobs)
 
     x = sub.add_parser("serve", help="run the local HTTP API")

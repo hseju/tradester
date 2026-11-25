@@ -12,6 +12,7 @@ kill switch.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, time, timedelta
 from decimal import Decimal
@@ -225,6 +226,40 @@ class Breach:
     evidence: list[Evidence]
 
 
+@dataclass
+class ProForma:
+    """The book as it would stand after the legs checked so far (for multi-leg plans)."""
+
+    total: Decimal
+    cash_cad: Decimal
+    ticker_values: dict[str, Decimal]
+    sector_values: dict[str, Decimal]
+    account_cash: dict[tuple[str, str], Decimal]
+    account_qty: dict[tuple[str, str], Decimal]
+
+    @classmethod
+    def from_view(cls, view: PortfolioView) -> "ProForma":
+        cash: dict[tuple[str, str], Decimal] = {}
+        for c in view.cash:
+            cash[(c.account_id, c.currency)] = cash.get((c.account_id, c.currency), ZERO) + c.amount
+        qty: dict[tuple[str, str], Decimal] = {}
+        for h in view.holdings:
+            qty[(h.account_id, h.ticker)] = qty.get((h.account_id, h.ticker), ZERO) + h.quantity
+        return cls(view.total_cad, view.cash_cad, view.ticker_values(), view.sector_values(), cash, qty)
+
+    def apply(self, intent: "TradeIntent", currency: str, sector: str | None, price: Decimal, fx: Decimal) -> None:
+        native = intent.quantity * price
+        cad = native * fx
+        sign = 1 if intent.side.upper() == "BUY" else -1
+        key_c, key_q = (intent.account_id, currency), (intent.account_id, intent.ticker)
+        self.account_cash[key_c] = self.account_cash.get(key_c, ZERO) - sign * native
+        self.account_qty[key_q] = self.account_qty.get(key_q, ZERO) + sign * intent.quantity
+        self.cash_cad -= sign * cad
+        self.ticker_values[intent.ticker] = self.ticker_values.get(intent.ticker, ZERO) + sign * cad
+        if sector:
+            self.sector_values[sector] = self.sector_values.get(sector, ZERO) + sign * cad
+
+
 class RiskOfficer:
     actor = "risk_officer"
 
@@ -233,7 +268,19 @@ class RiskOfficer:
         self.rules = rules
 
     # --- pre-trade -----------------------------------------------------------
-    def check_trade(self, intent: TradeIntent) -> RiskDecision:
+    def check_plan(self, intents: list[TradeIntent]) -> list[RiskDecision]:
+        """Check legs in order; each passing leg is applied before the next is checked,
+        so a buy can rely on the cash an earlier sell in the same plan raises."""
+        state: ProForma | None = None
+        out = []
+        for intent in intents:
+            acct = self.books.account(intent.account_id)
+            if state is None and acct is not None:
+                state = ProForma.from_view(self.books.portfolio(acct.book))
+            out.append(self.check_trade(intent, state=state, apply=True))
+        return out
+
+    def check_trade(self, intent: TradeIntent, *, state: ProForma | None = None, apply: bool = False) -> RiskDecision:
         checks: list[CheckResult] = []
         add = checks.append
         ks = self.rules.kill_switch()
@@ -256,7 +303,8 @@ class RiskOfficer:
         add(CheckResult("limit_orders_only", "Limit orders only", is_limit,
                         "limit order" if is_limit else "market orders are not allowed; set a maximum price"))
 
-        view = self.books.portfolio(acct.book)
+        if state is None:
+            state = ProForma.from_view(self.books.portfolio(acct.book))
         price_row = self.books.latest_price(intent.ticker)
         fx, _ = self.books.fx_to_cad(inst.currency)
         fresh = price_row is not None and not self.books.is_stale(price_row.as_of) and fx is not None
@@ -280,19 +328,19 @@ class RiskOfficer:
         ref_px = intent.limit_price if (side == "BUY" and is_limit) else last
         notional_native = qty * ref_px
         if side == "BUY":
-            have = view.cash_in(acct.id, inst.currency)
+            have = state.account_cash.get((acct.id, inst.currency), ZERO)
             add(CheckResult("funds", "Enough cash in the account", notional_native <= have,
                             f"needs {money(notional_native)} {inst.currency}, has {money(have)} {inst.currency}"))
         else:
-            held = view.position_qty(acct.id, intent.ticker)
+            held = state.account_qty.get((acct.id, intent.ticker), ZERO)
             add(CheckResult("funds", "Enough shares in the account", qty <= held, f"selling {qty}, holds {held}"))
 
         # Pro-forma portfolio after the trade (total value unchanged; cash <-> position)
         notional = notional_native * fx
-        total = view.total_cad
-        tv = view.ticker_values()
-        sectors = view.sector_values()
-        cash_after = view.cash_cad - notional if side == "BUY" else view.cash_cad + notional
+        total = state.total
+        tv = state.ticker_values
+        sectors = state.sector_values
+        cash_after = state.cash_cad - notional if side == "BUY" else state.cash_cad + notional
         delta = notional if side == "BUY" else -notional
         tv_after = tv.get(intent.ticker, ZERO) + delta
 
@@ -322,7 +370,7 @@ class RiskOfficer:
         if cash_rule.enabled:
             after = pct(cash_after, total)
             ok = side == "SELL" or after >= cash_rule.value
-            add(CheckResult(cash_rule.key, cash_rule.label, ok, f"cash {pct(view.cash_cad, total):.1f}% -> {after:.1f}%",
+            add(CheckResult(cash_rule.key, cash_rule.label, ok, f"cash {pct(state.cash_cad, total):.1f}% -> {after:.1f}%",
                             f"{after:.2f}%", f"{cash_rule.value}%"))
 
         news_rule = self.rules.get("headline_cooldown_hours")
@@ -341,7 +389,12 @@ class RiskOfficer:
             add(CheckResult(key, r.label, loss < r.value, f"Trader loss {money(loss)} CAD of {r.value} limit",
                             str(money(loss)), str(r.value)))
 
-        return RiskDecision(all(c.passed for c in checks), checks)
+        decision = RiskDecision(all(c.passed for c in checks), checks)
+        if apply and decision.passed:
+            # Conservative: a buy costs at most its limit; a sell raises at least its limit.
+            plan_px = intent.limit_price if is_limit else last
+            state.apply(intent, inst.currency, inst.sector if inst.asset_type == "stock" else None, plan_px, fx)
+        return decision
 
     def _day_start(self) -> datetime:
         local = self.books.now().astimezone(ET)
@@ -429,9 +482,10 @@ class RiskOfficer:
         filed = []
         for b in self.scan(book):
             prior = desk.recent(agent=self.actor, subject=b.subject, limit=1)
-            if prior and prior[0].as_of.astimezone(ET).date() == now.astimezone(ET).date() \
-                    and prior[0].finding.startswith(b.detail.split(";")[0]):
-                continue
+            if prior and prior[0].as_of.astimezone(ET).date() == now.astimezone(ET).date():
+                m = re.search(r" (?:is|are) (\d+(?:\.\d+)?)% of the portfolio", prior[0].finding)
+                if m is None or abs(Decimal(m.group(1)) - b.value_pct) < 1:
+                    continue  # already reported today at about this level
             stance = Stance.TRIM if b.rule in {"max_single_stock_pct", "max_sector_pct"} else Stance.HOLD
             report = AgentReport(
                 agent=self.actor, as_of=now, subject=b.subject, finding=b.detail, stance=stance,

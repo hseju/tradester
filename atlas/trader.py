@@ -12,6 +12,7 @@ Phase 1 routes orders to the PaperBroker only.
 from __future__ import annotations
 
 import hashlib
+import uuid
 from decimal import Decimal
 
 from sqlalchemy.orm import Session
@@ -48,15 +49,7 @@ class Trader:
     def propose(self, intent: TradeIntent, *, rationale: str = "", proposed_by: str = USER,
                 report_ids: list[int] | None = None) -> models.Proposal:
         report_ids = report_ids or []
-        desk = ReportDesk(self.session)
-        reports = [desk.get(i) for i in report_ids]
-        if any(r is None for r in reports):
-            raise TradeRefused("a cited report does not exist")
-        weak = [r.id for r in reports if not r.can_support_trade]
-        if weak:
-            raise TradeRefused(f"reports {weak} have no sourced claims for a trade stance and can't justify a trade")
-        if proposed_by != USER and not reports:
-            raise TradeRefused("an agent's proposal must cite at least one report with sourced evidence")
+        self._check_reports(report_ids, proposed_by)
         decision = self.risk.check_trade(intent)
         p = models.Proposal(
             account_id=intent.account_id, ticker=intent.ticker, side=intent.side.upper(), quantity=intent.quantity,
@@ -68,6 +61,74 @@ class Trader:
         self.session.flush()
         models.audit(self.session, proposed_by, "propose", proposal=p.id, status=p.status, risk=decision.summary())
         return p
+
+    def _check_reports(self, report_ids: list[int], proposed_by: str) -> None:
+        desk = ReportDesk(self.session)
+        reports = [desk.get(i) for i in report_ids]
+        if any(r is None for r in reports):
+            raise TradeRefused("a cited report does not exist")
+        weak = [r.id for r in reports if not r.can_support_trade]
+        if weak:
+            raise TradeRefused(f"reports {weak} have no sourced claims for a trade stance and can't justify a trade")
+        if proposed_by != USER and not reports:
+            raise TradeRefused("an agent's proposal must cite at least one report with sourced evidence")
+
+    # -- multi-leg plans ---------------------------------------------------------
+    def propose_plan(self, legs: list[tuple[TradeIntent, str]], *, proposed_by: str = USER,
+                     report_ids: list[int] | None = None) -> list[models.Proposal]:
+        """Propose several legs as one plan. legs = [(intent, rationale), ...], in execution order
+        (sells first). The Risk Officer checks them as a sequence."""
+        report_ids = report_ids or []
+        self._check_reports(report_ids, proposed_by)
+        group = f"plan-{uuid.uuid4().hex[:10]}"
+        decisions = self.risk.check_plan([i for i, _ in legs])
+        out = []
+        for seq, ((intent, why), decision) in enumerate(zip(legs, decisions)):
+            p = models.Proposal(
+                account_id=intent.account_id, ticker=intent.ticker, side=intent.side.upper(),
+                quantity=intent.quantity, limit_price=intent.limit_price, order_type=intent.order_type.upper(),
+                rationale=why, proposed_by=proposed_by, report_ids=report_ids, group_id=group, sequence=seq,
+                status="proposed" if decision.passed else "blocked", risk_result=decision.to_dict(),
+            )
+            self.session.add(p)
+            out.append(p)
+        self.session.flush()
+        models.audit(self.session, proposed_by, "propose_plan", group=group, legs=[p.id for p in out],
+                     blocked=[p.id for p in out if p.status == "blocked"])
+        return out
+
+    def plan(self, group_id: str) -> list[models.Proposal]:
+        from sqlalchemy import select
+
+        return list(self.session.scalars(select(models.Proposal).where(models.Proposal.group_id == group_id)
+                                         .order_by(models.Proposal.sequence)))
+
+    def approve_plan(self, group_id: str, actor: str = USER) -> list[models.Proposal]:
+        """Approve every leg still awaiting approval, re-check them as a sequence, then execute in order.
+        A leg that no longer passes is blocked and skipped; the others still run."""
+        if actor != USER:
+            raise TradeRefused("only you can approve a trade")
+        legs = [p for p in self.plan(group_id) if p.status == "proposed"]
+        if not legs:
+            raise TradeRefused(f"plan {group_id} has nothing awaiting approval")
+        decisions = self.risk.check_plan([self._intent(p) for p in legs])
+        now = utcnow()
+        for p, d in zip(legs, decisions):
+            p.risk_result, p.decided_at = d.to_dict(), now
+            if d.passed:
+                p.status, p.approval_hash = "approved", order_hash(p)
+            else:
+                p.status = "blocked"
+        models.audit(self.session, actor, "approve_plan", group=group_id,
+                     approved=[p.id for p in legs if p.status == "approved"])
+        self.session.flush()
+        for p in legs:
+            if p.status == "approved":
+                try:
+                    self.execute(p.id)
+                except TradeRefused:
+                    pass  # recorded on the proposal and in the audit log
+        return self.plan(group_id)
 
     def approve(self, proposal_id: int, actor: str = USER, execute: bool = True) -> models.Proposal:
         if actor != USER:

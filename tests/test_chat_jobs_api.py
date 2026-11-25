@@ -98,24 +98,28 @@ def test_claude_atlas_refusal_rolls_back_history(seeded):
 def test_job_prices_files_breach_and_skips_when_closed(seeded, clock):
     out = job_prices(seeded)
     assert out["breach_reports"]  # NVDA over the cap
+    assert out["advisor"]["reports"]  # US stocks past their band -> the Advisor runs straight away
     clock.t += timedelta(hours=10)
     assert job_prices(seeded) == {"skipped": "market closed"}
 
 
 def test_job_news_marks_major_headlines(seeded, sample, clock):
-    sample.get_news = lambda t, a, b: [NewsItem(t, clock() - timedelta(hours=1), f"{t} announces acquisition",
+    sample.get_news = lambda t, a, b: [NewsItem(t, clock() - timedelta(hours=1), "Royal Bank announces acquisition",
                                                 "", "wire", "", "sample", f"{t}-1")] if t == "RY.TO" else []
-    assert job_news(seeded)["added"]["RY.TO"] == 1
-    assert job_news(seeded)["added"]["RY.TO"] == 0  # de-duplicated
+    first = job_news(seeded)
+    assert first["headlines_added"] == 1 and first["classified"] == 1 and first["reports"]
+    assert job_news(seeded)["headlines_added"] == 0  # de-duplicated
     with seeded.services() as s:
-        assert s.books.headlines("RY.TO")[0].is_major
+        h = s.books.headlines("RY.TO")[0]
+        assert h.is_major and h.relevant and h.classified_by == "keywords"
 
 
 def test_daily_close_and_scheduler(seeded):
     out = job_daily_close(seeded)
     assert out["bookkeeper_report"]
     sched = build_scheduler(seeded, blocking=False)
-    assert {j.id for j in sched.get_jobs()} == {"prices", "prices_close", "news", "daily_close"}
+    assert {j.id for j in sched.get_jobs()} == {"prices", "prices_close", "market_watch", "morning_scan",
+                                                "daily_close", "advisor"}
 
 
 # --- api -------------------------------------------------------------------------

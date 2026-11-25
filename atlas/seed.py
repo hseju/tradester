@@ -24,9 +24,9 @@ SAMPLE_TARGETS = {
     "cash": ("8", "5"),
 }
 
-SAMPLE_GOALS = [
-    ("house", "House down payment", "40000", date(2029, 6, 30), ["fhsa"], 1),
-    ("retirement", "Retirement", "1000000", date(2055, 1, 1), ["rrsp", "tfsa"], 2),
+SAMPLE_GOALS = [  # id, name, target, date, accounts, priority, monthly contribution
+    ("house", "House down payment", "40000", date(2029, 6, 30), ["fhsa"], 1, "800"),
+    ("retirement", "Retirement", "1000000", date(2055, 1, 1), ["rrsp", "tfsa"], 2, "750"),
 ]
 
 
@@ -36,8 +36,8 @@ def seed_sample(s: Services, holdings_csv: Path | None = None) -> dict:
     result = s.bookkeeper.import_from_broker(ManualBroker(holdings_csv or SAMPLE_DIR / "holdings.csv"))
     for bucket, (tgt, band) in SAMPLE_TARGETS.items():
         s.bookkeeper.set_target(bucket, Decimal(tgt), Decimal(band))
-    for gid, name, amount, when, accts, prio in SAMPLE_GOALS:
-        s.bookkeeper.upsert_goal(gid, name, Decimal(amount), when, accts, prio)
+    for gid, name, amount, when, accts, prio, monthly in SAMPLE_GOALS:
+        s.bookkeeper.upsert_goal(gid, name, Decimal(amount), when, accts, prio, monthly_contribution=Decimal(monthly))
     refresh = s.bookkeeper.refresh_prices(s.prices)
     paper = s.bookkeeper.clone_to_paper()
     s.bookkeeper.snapshot()

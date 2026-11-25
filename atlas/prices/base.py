@@ -51,6 +51,18 @@ class NewsItem:
 
 
 @dataclass(frozen=True)
+class CalendarItem:
+    kind: str  # earnings | economic | policy
+    at: datetime
+    title: str
+    provider: str
+    external_id: str
+    ticker: str | None = None
+    country: str | None = None
+    detail: dict | None = None
+
+
+@dataclass(frozen=True)
 class FxQuote:
     pair: str  # "USDCAD" = CAD per 1 USD
     rate: Decimal

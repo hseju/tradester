@@ -16,6 +16,7 @@ from atlas import models
 from atlas.app import Services
 from atlas.bookkeeper import money, pct
 from atlas.market import normalize_ticker
+from atlas.agents import LIVE_AGENTS
 from atlas.reports import dissent
 from atlas.risk import TradeIntent
 
@@ -50,6 +51,8 @@ class ToolBox:
             "get_orders": self.orders,
             "get_net_worth_history": self.net_worth_history,
             "get_quote": self.quote,
+            "get_events": self.events,
+            "get_plans": self.plans,
         }
 
     # -- schema -------------------------------------------------------------
@@ -108,6 +111,14 @@ class ToolBox:
             {"name": "get_quote",
              "description": "The latest cached price for a ticker, its source and whether it is stale.",
              "input_schema": obj({"ticker": {"type": "string"}}, ["ticker"])},
+            {"name": "get_events",
+             "description": "Upcoming earnings dates for holdings and watchlist names, and economic releases "
+                            "(Canada and US), from Market Watch's calendar.",
+             "input_schema": obj({"days": {"type": "integer", "minimum": 1, "maximum": 30}})},
+            {"name": "get_plans",
+             "description": "Multi-leg plans (e.g. the Advisor's rebalance) with each leg's rationale, status and "
+                            "Risk Officer result. Plans wait for the person's approval; you can't approve them.",
+             "input_schema": obj({"status": {"type": "string", "enum": ["open", "all"]}})},
         ]
 
     def run(self, name: str, args: dict | None) -> str:
@@ -197,7 +208,7 @@ class ToolBox:
         latest = self.s.desk.latest_per_agent(subject=args.get("subject")) if args.get("subject") else []
         return {"reports": [r.to_public() for r in reps],
                 "dissenting_reports": [r.to_public() for r in dissent(latest)] if latest else [],
-                "agents_live_in_phase_1": ["bookkeeper", "risk_officer"]}
+                "agents_live": LIVE_AGENTS}
 
     def news(self, args: dict) -> dict:
         ticker = normalize_ticker(str(args["ticker"]))
@@ -228,6 +239,30 @@ class ToolBox:
         snaps = self.s.books.net_worth_history(_book(args), int(args.get("days", 30)))
         return {"snapshots": [{"taken_at": n.taken_at.isoformat(), "total": _r(n.total_cad), "cash": _r(n.cash_cad)}
                               for n in snaps]}
+
+    def events(self, args: dict) -> dict:
+        evs = self.s.books.upcoming_events(days=int(args.get("days", 7)))
+        owned = set(self.s.books.tracked_tickers())
+        return {"events": [{"kind": e.kind, "at": e.at.isoformat(), "title": e.title, "ticker": e.ticker,
+                            "owned": e.ticker in owned if e.ticker else None, "country": e.country,
+                            "detail": e.detail} for e in evs],
+                "watchlist": [w.ticker for w in self.s.books.watchlist()]}
+
+    def plans(self, args: dict) -> dict:
+        q = select(models.Proposal).where(models.Proposal.group_id.is_not(None))
+        if args.get("status", "open") == "open":
+            q = q.where(models.Proposal.status.in_(["proposed", "blocked"]))
+        groups: dict[str, list] = {}
+        for p in self.s.session.scalars(q.order_by(models.Proposal.created_at.desc(), models.Proposal.sequence)):
+            groups.setdefault(p.group_id, []).append(p)
+        return {"plans": [{
+            "plan_id": gid, "proposed_by": legs[0].proposed_by, "created_at": legs[0].created_at.isoformat(),
+            "cites_reports": legs[0].report_ids, "approve_with": f"atlas plan approve {gid}",
+            "legs": [{"id": p.id, "seq": p.sequence, "account": p.account_id, "side": p.side, "ticker": p.ticker,
+                      "quantity": str(p.quantity), "limit_price": str(p.limit_price), "status": p.status,
+                      "rationale": p.rationale,
+                      "blocked_by": [c["label"] for c in p.risk_result.get("checks", []) if not c["passed"]]}
+                     for p in sorted(legs, key=lambda x: x.sequence)]} for gid, legs in groups.items()]}
 
     def quote(self, args: dict) -> dict:
         ticker = normalize_ticker(str(args["ticker"]))

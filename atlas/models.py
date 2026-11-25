@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import JSON, Boolean, Date, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, Date, ForeignKey, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from atlas.db import Base, DecimalText, UTCDateTime, utcnow
@@ -112,6 +112,38 @@ class Headline(Base):
     provider: Mapped[str] = mapped_column(String(32))
     external_id: Mapped[str] = mapped_column(String(128))
     is_major: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Set by Market Watch. relevant=False means "doesn't touch your money": kept, but not reported.
+    relevant: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    category: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    why: Mapped[str | None] = mapped_column(Text, nullable=True)
+    classified_by: Mapped[str | None] = mapped_column(String(32), nullable=True)
+
+
+class WatchItem(Base):
+    """Something you watch or plan for but don't own. Market Watch keeps news on these too."""
+
+    __tablename__ = "watchlist"
+
+    ticker: Mapped[str] = mapped_column(String(32), primary_key=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+    added_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
+class CalendarEvent(Base):
+    """Earnings dates, economic releases and central-bank decisions."""
+
+    __tablename__ = "calendar_events"
+    __table_args__ = (UniqueConstraint("provider", "external_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    kind: Mapped[str] = mapped_column(String(16))  # earnings | economic | policy
+    at: Mapped[datetime] = mapped_column(UTCDateTime, index=True)
+    title: Mapped[str] = mapped_column(Text)
+    ticker: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    provider: Mapped[str] = mapped_column(String(32))
+    external_id: Mapped[str] = mapped_column(String(160))
 
 
 class Goal(Base):
@@ -123,6 +155,7 @@ class Goal(Base):
     target_date: Mapped[date] = mapped_column(Date)
     priority: Mapped[int] = mapped_column(Integer, default=1)
     account_ids: Mapped[list] = mapped_column(JSON, default=list)
+    monthly_contribution: Mapped[Decimal | None] = mapped_column(DecimalText, nullable=True)
 
 
 class TargetAllocation(Base):
@@ -188,6 +221,9 @@ class Proposal(Base):
     status: Mapped[str] = mapped_column(String(12), default="proposed")
     risk_result: Mapped[dict] = mapped_column(JSON, default=dict)
     approval_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # A multi-leg plan (e.g. an Advisor rebalance): legs share group_id and run in `sequence` order.
+    group_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    sequence: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"))
     order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)

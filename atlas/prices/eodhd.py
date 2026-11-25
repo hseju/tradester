@@ -11,7 +11,7 @@ from typing import Iterable
 import httpx2 as httpx
 
 from atlas.market import ET, currency_for, parse_ticker
-from atlas.prices.base import AdapterError, Bar, FxQuote, NewsItem, Quote, redact, to_decimal
+from atlas.prices.base import AdapterError, Bar, CalendarItem, FxQuote, NewsItem, Quote, redact, to_decimal
 
 BASE_URL = "https://eodhd.com/api"
 BATCH = 15  # tickers per real-time request
@@ -133,6 +133,40 @@ class EODHDAdapter:
             raise AdapterError(f"eodhd returned no rate for {pair}")
         return FxQuote(pair=pair.upper(), rate=rate, as_of=datetime.fromtimestamp(ts, tz=timezone.utc), source=self.name)
 
+    # -- calendars ------------------------------------------------------------
+    def get_economic_events(self, country: str, since: date, until: date) -> list[CalendarItem]:
+        rows = self._get("/economic-events", country=country.upper(), limit=500,
+                         **{"from": since.isoformat(), "to": until.isoformat()})
+        items = []
+        for r in rows or []:
+            when = _parse_dt(r.get("date"))
+            kind = (r.get("type") or "").strip()
+            if when is None or not kind:
+                continue
+            period = r.get("period") or ""
+            items.append(CalendarItem(
+                kind="economic", at=when, title=f"{country.upper()} {kind}" + (f" ({period})" if period else ""),
+                provider=self.name, external_id=f"{country}:{kind}:{period}:{when.isoformat()}", country=country.upper(),
+                detail={k: r.get(k) for k in ("comparison", "actual", "previous", "estimate", "change") if r.get(k) is not None},
+            ))
+        return items
+
+    def get_earnings(self, ticker: str, since: date, until: date) -> list[CalendarItem]:
+        data = self._get("/calendar/earnings", symbols=ticker, **{"from": since.isoformat(), "to": until.isoformat()})
+        items = []
+        for r in (data or {}).get("earnings", []):
+            day = r.get("report_date")
+            if not day:
+                continue
+            timing = r.get("before_after_market") or ""
+            items.append(CalendarItem(
+                kind="earnings", at=market_close_utc(date.fromisoformat(day)),
+                title=f"{ticker} earnings" + (f" ({timing})" if timing else ""), provider=self.name,
+                external_id=f"earn:{ticker}:{day}", ticker=ticker,
+                detail={"timing": timing, "estimate": r.get("estimate"), "period_end": r.get("date")},
+            ))
+        return items
+
     # -- fundamentals (used by Value/Filings Research in later phases) ------
     def get_fundamentals(self, ticker: str) -> dict:
         return self._get(f"/fundamentals/{ticker}")
@@ -140,3 +174,13 @@ class EODHDAdapter:
 
 def market_close_utc(day: date) -> datetime:
     return datetime.combine(day, time(16, 0), tzinfo=ET).astimezone(timezone.utc)
+
+
+def _parse_dt(value) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)

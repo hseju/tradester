@@ -45,6 +45,14 @@ BUCKET_LABELS = {
     "cash": "Cash",
     "other": "Other",
 }
+# Long-run return assumptions per bucket (% a year, nominal). Yours to set: `atlas assume BUCKET PCT`.
+DEFAULT_ASSUMPTIONS = {
+    "expected_return_pct": {"ca_equity": "6.0", "us_equity": "6.0", "intl_equity": "6.0",
+                            "fixed_income": "3.5", "cash": "2.5", "other": "4.0"},
+    "min_trade_cad": "200",
+}
+ASSUMPTIONS_KEY = "advisor_assumptions"
+EQUITY_BUCKETS = ("ca_equity", "us_equity", "intl_equity")
 ZERO = Decimal(0)
 CENT = Decimal("0.01")
 MAJOR_HEADLINE_WORDS = (
@@ -166,8 +174,9 @@ class GoalView:
     current_cad: Decimal
     progress_pct: Decimal
     months_left: int
-    # Plain arithmetic, no growth assumed. The Advisor does the real pacing later.
+    # Plain arithmetic, no growth assumed. The Advisor does the pacing with return assumptions.
     needed_per_month_no_growth: Decimal | None
+    monthly_contribution: Decimal = ZERO
 
 
 @dataclass
@@ -299,6 +308,40 @@ class Books:
         )
         return list(self.session.scalars(q))
 
+    def assumptions(self) -> dict:
+        row = self.session.get(models.SystemFlag, ASSUMPTIONS_KEY)
+        stored = row.value if row else {}
+        er = {**DEFAULT_ASSUMPTIONS["expected_return_pct"], **stored.get("expected_return_pct", {})}
+        return {"expected_return_pct": {k: Decimal(v) for k, v in er.items()},
+                "min_trade_cad": Decimal(stored.get("min_trade_cad", DEFAULT_ASSUMPTIONS["min_trade_cad"]))}
+
+    def watchlist(self) -> list[models.WatchItem]:
+        return list(self.session.scalars(select(models.WatchItem).order_by(models.WatchItem.ticker)))
+
+    def universe(self) -> list[str]:
+        """Everything Market Watch cares about: what you own (either book) and what you watch."""
+        return sorted(set(self.tracked_tickers()) | {w.ticker for w in self.watchlist()})
+
+    def upcoming_events(self, days: int = 7, kinds: tuple[str, ...] | None = None) -> list[models.CalendarEvent]:
+        now = self.now()
+        q = (select(models.CalendarEvent)
+             .where(models.CalendarEvent.at >= now - timedelta(hours=12), models.CalendarEvent.at <= now + timedelta(days=days))
+             .order_by(models.CalendarEvent.at))
+        if kinds:
+            q = q.where(models.CalendarEvent.kind.in_(kinds))
+        return list(self.session.scalars(q))
+
+    def fx_change(self, pair: str = "USDCAD") -> tuple[models.FxRate | None, models.FxRate | None]:
+        """(latest rate, latest rate from an earlier day) - for 'the loonie moved' checks."""
+        latest = self.latest_fx(pair)
+        if latest is None:
+            return None, None
+        day_start = latest.as_of.replace(hour=0, minute=0, second=0, microsecond=0)
+        prev = self.session.scalars(
+            select(models.FxRate).where(models.FxRate.pair == pair, models.FxRate.as_of < day_start)
+            .order_by(models.FxRate.as_of.desc(), models.FxRate.id.desc()).limit(1)).first()
+        return latest, prev
+
     # the main view ---------------------------------------------------------
     def portfolio(self, book: str = models.BOOK_REAL) -> PortfolioView:
         now = self.now()
@@ -411,24 +454,27 @@ class Books:
             day_change_cad=sum(day, ZERO) if day else None, uses_sample_data=sample_seen,
         )
 
-    def allocation(self, view: PortfolioView | None = None) -> list[BucketView]:
+    def allocation(self, view: PortfolioView | None = None, account_ids: list[str] | None = None) -> list[BucketView]:
+        """Mix vs target, for the whole book or (account_ids) a subset such as a goal's accounts."""
         view = view or self.portfolio()
+        keep = set(account_ids) if account_ids is not None else None
         values = {b: ZERO for b in BUCKETS}
         for h in view.holdings:
-            if h.value_cad is None:
+            if h.value_cad is None or (keep is not None and h.account_id not in keep):
                 continue
             mix = h.allocation or {"other": 1}
             total_w = sum((Decimal(str(w)) for w in mix.values()), ZERO) or Decimal(1)
             for bucket, w in mix.items():
                 values[bucket if bucket in values else "other"] += h.value_cad * Decimal(str(w)) / total_w
-        values["cash"] += view.cash_cad
+        values["cash"] += sum((c.value_cad or ZERO for c in view.cash if keep is None or c.account_id in keep), ZERO)
+        total = sum(values.values(), ZERO)
         targets = self.targets()
         out = []
         for b in BUCKETS:
             t = targets.get(b)
             if values[b] == 0 and t is None:
                 continue
-            out.append(BucketView(b, BUCKET_LABELS[b], values[b], pct(values[b], view.total_cad),
+            out.append(BucketView(b, BUCKET_LABELS[b], values[b], pct(values[b], total),
                                   t.target_pct if t else None, t.band_pct if t else None))
         return out
 
@@ -443,7 +489,8 @@ class Books:
             remaining = max(ZERO, g.target_amount - cur)
             out.append(GoalView(g.id, g.name, g.target_amount, g.target_date, g.priority, list(g.account_ids), cur,
                                 pct(cur, g.target_amount), months,
-                                (remaining / months) if months else (remaining or None)))
+                                (remaining / months) if months else (remaining or None),
+                                g.monthly_contribution or ZERO))
         return out
 
 
@@ -709,12 +756,77 @@ class Bookkeeper(Books):
         models.audit(self.session, actor, "set_target", bucket=bucket, target_pct=target_pct, band_pct=band_pct)
 
     def upsert_goal(self, goal_id: str, name: str, target_amount: Decimal, target_date: date,
-                    account_ids: list[str], priority: int = 1, actor: str = "user") -> None:
+                    account_ids: list[str], priority: int = 1, actor: str = "user",
+                    monthly_contribution: Decimal | None = None) -> None:
         g = self.session.get(models.Goal, goal_id) or models.Goal(id=goal_id)
         g.name, g.target_amount, g.target_date, g.account_ids, g.priority = (
             name, target_amount, target_date, account_ids, priority)
+        if monthly_contribution is not None:
+            g.monthly_contribution = monthly_contribution
         self.session.add(g)
         models.audit(self.session, actor, "set_goal", goal=goal_id, target=target_amount, date=target_date)
+
+    def set_goal_contribution(self, goal_id: str, monthly: Decimal, actor: str = "user") -> None:
+        g = self.session.get(models.Goal, goal_id)
+        if g is None:
+            raise KeyError(f"no goal {goal_id}")
+        g.monthly_contribution = monthly
+        models.audit(self.session, actor, "set_goal_contribution", goal=goal_id, monthly=monthly)
+
+    def set_assumption(self, key: str, value: Decimal, actor: str = "user") -> None:
+        """Set an Advisor assumption: a bucket's expected return (%/yr) or 'min_trade_cad'."""
+        if actor != "user":
+            raise PermissionError("only you set the Advisor's assumptions")
+        row = self.session.get(models.SystemFlag, ASSUMPTIONS_KEY)
+        data = dict(row.value) if row else {}
+        if key == "min_trade_cad":
+            data["min_trade_cad"] = str(value)
+        elif key in BUCKETS:
+            if not Decimal(-50) < value < Decimal(50):
+                raise ValueError("expected return must be a percent a year, e.g. 5.5")
+            data["expected_return_pct"] = {**data.get("expected_return_pct", {}), key: str(value)}
+        else:
+            raise KeyError(f"unknown assumption {key}; a bucket ({', '.join(BUCKETS)}) or min_trade_cad")
+        if row is None:
+            self.session.add(models.SystemFlag(key=ASSUMPTIONS_KEY, value=data))
+        else:
+            row.value = data
+        models.audit(self.session, actor, "set_assumption", key=key, value=value)
+        self.session.flush()
+
+    def add_watch(self, ticker: str, note: str = "", actor: str = "user") -> None:
+        if self.session.get(models.WatchItem, ticker) is None:
+            self.session.add(models.WatchItem(ticker=ticker, note=note))
+        self._ensure_instrument(ticker)
+        models.audit(self.session, actor, "watch_add", ticker=ticker)
+        self.session.flush()
+
+    def remove_watch(self, ticker: str, actor: str = "user") -> None:
+        row = self.session.get(models.WatchItem, ticker)
+        if row is not None:
+            self.session.delete(row)
+        models.audit(self.session, actor, "watch_remove", ticker=ticker)
+
+    def record_events(self, items) -> int:
+        n = 0
+        for it in items:
+            exists = self.session.scalars(select(models.CalendarEvent.id).where(
+                models.CalendarEvent.provider == it.provider, models.CalendarEvent.external_id == it.external_id)).first()
+            if exists:
+                continue
+            self.session.add(models.CalendarEvent(kind=it.kind, at=it.at, title=it.title, ticker=it.ticker,
+                                                  country=it.country, detail=it.detail or {}, provider=it.provider,
+                                                  external_id=it.external_id))
+            n += 1
+        self.session.flush()
+        return n
+
+    def update_headline(self, headline_id: int, *, relevant: bool, major: bool, category: str, why: str,
+                        classified_by: str) -> models.Headline:
+        """Market Watch's verdict on a headline. A major flag feeds the Risk Officer's 24-hour rule."""
+        h = self.session.get(models.Headline, headline_id)
+        h.relevant, h.is_major, h.category, h.why, h.classified_by = relevant, major, category, why, classified_by
+        return h
 
     # snapshots & reports -----------------------------------------------------------
     def snapshot(self, book: str = models.BOOK_REAL) -> models.NetWorthSnapshot:

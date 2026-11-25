@@ -34,9 +34,13 @@ How the board works:
 NO VIEW), confidence 0-1, urgency, evidence with sources, wrong_if, next_check.
 - The Bookkeeper holds the single source of truth (holdings, cash, prices, goals). It reports facts, never opinions.
 - The Risk Officer enforces the person's rules in code. Its pass or block is final; nobody argues past it.
-- In this first phase only the Bookkeeper and the Risk Officer are running. Advisor, Market Watch, Filings Research, \
-Value Research, Tax & Accounts, Savings Coach, Scout and Auditor are not built yet. If a question needs one of them, \
-say it isn't live yet rather than speaking for it.
+- Live now: the Bookkeeper, the Risk Officer, the Advisor (drift, goal pacing, rebalance plans) and Market Watch \
+(headlines, the 24-hour pause, why things moved, the week's calendar). Filings Research, Value Research, Tax & \
+Accounts, Savings Coach, Scout and Auditor are not built yet. If a question needs one of them, say it isn't live yet \
+rather than speaking for it.
+- Advisor goal projections rest on return assumptions the person set; say so when you quote one.
+- Plans the Advisor proposes wait for the person. Describe them (get_plans) and tell them how to approve: \
+`atlas plan approve PLAN_ID`.
 
 Your rules:
 - Every number you state comes from a tool call made in this conversation. Never estimate, recall or invent prices, \
@@ -75,12 +79,16 @@ class OfflineAtlas:
             call = lambda name, **a: json.loads(tb.run(name, a))  # noqa: E731
             if re.search(r"\b(kill|risk|rule|rules|breach|cap|limit)\b", q):
                 return _fmt_risk(call("get_risk_status"))
-            if re.search(r"\b(allocation|mix|drift|target|rebalanc\w*)\b", q):
+            if re.search(r"\b(allocation|mix|drift|target)\b", q):
                 return _fmt_allocation(call("get_allocation"))
             if re.search(r"\b(goal|goals|house|retire\w*)\b", q):
-                return _fmt_goals(call("get_goals"))
+                return _fmt_goals(call("get_goals"), call("get_reports", agent="advisor", limit=30))
             if re.search(r"\b(report|reports|board|dissent\w*)\b", q):
                 return _fmt_reports(call("get_reports", limit=10))
+            if re.search(r"\b(plan|plans|rebalanc\w*)\b", q):
+                return _fmt_plans(call("get_plans"))
+            if re.search(r"\b(calendar|event|events|earnings|week)\b", q):
+                return _fmt_events(call("get_events", days=14))
             if re.search(r"\b(order|orders|trade|trades|paper|proposal\w*)\b", q):
                 return _fmt_orders(call("get_orders"))
             m = re.search(r"\b(news|headline\w*)\b.*?\b([A-Za-z]{1,6}(?:\.[A-Za-z]{1,3})?)\b\s*\??$", text, re.I)
@@ -205,6 +213,14 @@ def briefing(tb: ToolBox) -> str:
         lines.append(f"Drift: {b['label']} {b['pct']}% vs {b['target_pct']}% target ({float(b['drift_pct']):+.1f} pts).")
     if not risk["current_breaches"] and not drift:
         lines.append("No rule breaches and the mix is within its bands.")
+    plans = json.loads(tb.run("get_plans", {}))["plans"]
+    for p in plans:
+        legs = ", ".join(f"{l['side'].lower()} {l['quantity']} {l['ticker']}" for l in p["legs"])
+        lines.append(f"Waiting for you: {p['proposed_by']} plan {p['plan_id']} ({legs}). `atlas plan show {p['plan_id']}`")
+    events = json.loads(tb.run("get_events", {"days": 7}))["events"]
+    if events:
+        lines.append("This week: " + "; ".join(f"{e['title']} {e['at'][:10]}" for e in events[:4])
+                     + (f"; +{len(events) - 4} more" if len(events) > 4 else "") + ".")
     if ov["data_flags"]:
         lines.append("Data notes:")
         lines += _flag_lines(ov["data_flags"])
@@ -231,13 +247,18 @@ def _fmt_allocation(d: dict) -> str:
     return "\n".join(out)
 
 
-def _fmt_goals(d: dict) -> str:
+def _fmt_goals(d: dict, advisor: dict | None = None) -> str:
+    latest = {}
+    for r in (advisor or {}).get("reports", []):
+        latest.setdefault(r["subject"], r)
     out = []
     for g in d["goals"]:
         need = f"; {_m(g['needed_per_month_if_no_growth'])}/month closes the gap with no growth" \
             if g["needed_per_month_if_no_growth"] else ""
         out.append(f"{g['name']}: {_m(g['current'])} of {_m(g['target'])} ({g['progress_pct']}%) "
                    f"by {g['target_date']}{need}.")
+        if g["id"] in latest:
+            out.append(f"  Advisor: {latest[g['id']]['finding']}")
     return "\n".join(out) or "No goals set."
 
 
@@ -260,6 +281,25 @@ def _fmt_orders(d: dict) -> str:
         out.append(f"Paper order {o['id']}: {o['side']} {o['quantity']} {o['ticker']} - {o['status']} "
                    f"{('at ' + o['fill_price']) if o['fill_price'] else ''}".rstrip())
     return "\n".join(out) or "No proposals or paper orders yet."
+
+
+def _fmt_plans(d: dict) -> str:
+    if not d["plans"]:
+        return "No plans are waiting for you."
+    out = []
+    for p in d["plans"]:
+        out.append(f"Plan {p['plan_id']} from {p['proposed_by']} ({p['approve_with']}):")
+        for l in p["legs"]:
+            why = f" - blocked by {', '.join(l['blocked_by'])}" if l["blocked_by"] else ""
+            out.append(f"  {l['seq'] + 1}. {l['side']} {l['quantity']} {l['ticker']} @ {l['limit_price']} "
+                       f"in {l['account']} [{l['status']}]{why}\n     {l['rationale']}")
+    return "\n".join(out)
+
+
+def _fmt_events(d: dict) -> str:
+    if not d["events"]:
+        return "Nothing on the calendar for your holdings in that window."
+    return "\n".join(f"{e['at'][:10]}  {e['title']}" for e in d["events"])
 
 
 def _fmt_news(d: dict) -> str:

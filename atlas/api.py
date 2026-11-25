@@ -90,6 +90,14 @@ def create_api(app: AtlasApp) -> FastAPI:
     def orders(limit: int = 20):
         return tool("get_orders", limit=limit)
 
+    @api.get("/events")
+    def events(days: int = 7):
+        return tool("get_events", days=days)
+
+    @api.get("/plans")
+    def plans(status: str = "open"):
+        return tool("get_plans", status=status)
+
     @api.post("/risk/check")
     def risk_check(t: TradeIn):
         return tool("check_trade", account_id=t.account_id, ticker=t.ticker, side=t.side,
@@ -128,6 +136,16 @@ def create_api(app: AtlasApp) -> FastAPI:
             except TradeRefused as exc:
                 raise HTTPException(409, str(exc)) from None
             return {"id": p.id, "status": p.status}
+
+    @api.post("/plans/{group_id}/approve", dependencies=[Depends(require_token)])
+    def approve_plan(group_id: str):
+        with app.services() as s:
+            try:
+                legs = s.trader.approve_plan(group_id, actor=USER)
+            except TradeRefused as exc:
+                raise HTTPException(409, str(exc)) from None
+            return {"plan_id": group_id, "legs": [{"id": p.id, "status": p.status, "order_id": p.order_id}
+                                                  for p in legs]}
 
     @api.post("/kill-switch", dependencies=[Depends(require_token)])
     def kill(k: KillIn):

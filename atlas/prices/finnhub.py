@@ -11,7 +11,7 @@ from typing import Iterable
 import httpx2 as httpx
 
 from atlas.market import parse_ticker
-from atlas.prices.base import AdapterError, NewsItem, Quote, redact, to_decimal
+from atlas.prices.base import AdapterError, CalendarItem, NewsItem, Quote, redact, to_decimal
 
 BASE_URL = "https://finnhub.io/api/v1"
 
@@ -82,4 +82,24 @@ class FinnhubAdapter:
                     external_id=str(r.get("id") or r.get("url")),
                 )
             )
+        return items
+
+    def get_earnings(self, ticker: str, since: date, until: date) -> list[CalendarItem]:
+        from atlas.prices.eodhd import market_close_utc
+
+        symbol, exch = parse_ticker(ticker)
+        if exch != "US":
+            return []
+        data = self._get("/calendar/earnings", symbol=symbol, **{"from": since.isoformat(), "to": until.isoformat()})
+        items = []
+        for r in (data or {}).get("earningsCalendar", []):
+            if not r.get("date"):
+                continue
+            hour = {"bmo": "before open", "amc": "after close", "dmh": "during market"}.get(r.get("hour") or "", "")
+            items.append(CalendarItem(
+                kind="earnings", at=market_close_utc(date.fromisoformat(r["date"])),
+                title=f"{symbol}.US earnings" + (f" ({hour})" if hour else ""), provider=self.name,
+                external_id=f"earn:{symbol}.US:{r['date']}", ticker=f"{symbol}.US",
+                detail={"timing": hour, "eps_estimate": r.get("epsEstimate"), "quarter": r.get("quarter")},
+            ))
         return items

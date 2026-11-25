@@ -81,6 +81,33 @@ def create_all(engine: Engine) -> None:
     from atlas import models  # noqa: F401  (register tables)
 
     Base.metadata.create_all(engine)
+    upgrade_schema(engine)
+
+
+def upgrade_schema(engine: Engine) -> list[str]:
+    """Add columns introduced after a database was created (additive only).
+
+    New columns are nullable or carry a server default, so an older Atlas
+    database keeps working without a migration tool. Returns what was added.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    added = []
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if not insp.has_table(table.name):
+                continue
+            have = {c["name"] for c in insp.get_columns(table.name)}
+            for col in table.columns:
+                if col.name in have:
+                    continue
+                ddl = f'ALTER TABLE "{table.name}" ADD COLUMN "{col.name}" {col.type.compile(engine.dialect)}'
+                if col.server_default is not None:
+                    ddl += f" DEFAULT {col.server_default.arg.text if hasattr(col.server_default.arg, 'text') else repr(col.server_default.arg)}"
+                conn.execute(text(ddl))
+                added.append(f"{table.name}.{col.name}")
+    return added
 
 
 @contextmanager

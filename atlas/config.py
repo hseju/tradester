@@ -37,6 +37,8 @@ class Settings:
     anthropic_api_key: str | None = None
     model: str = "claude-opus-5-5"
     effort: str = "medium"
+    worker_model: str = "claude-opus-5-5"  # specialists' structured calls (run at low effort)
+    use_llm_specialists: bool = True  # False: Market Watch uses rules only, even with a key
     trading_broker: str = "paper"
     kill_switch_env: bool = False
     # Price freshness: intraday quotes older than this are stale while markets are open.
@@ -60,6 +62,8 @@ class Settings:
             anthropic_api_key=env("ANTHROPIC_API_KEY") or None,
             model=env("ATLAS_MODEL", "claude-opus-5-5"),
             effort=env("ATLAS_EFFORT", "medium"),
+            worker_model=env("ATLAS_WORKER_MODEL", "claude-opus-5-5"),
+            use_llm_specialists=_flag("ATLAS_LLM_SPECIALISTS", default=True),
             trading_broker=env("ATLAS_TRADING_BROKER", "paper").lower(),
             kill_switch_env=_flag("ATLAS_KILL_SWITCH"),
         )
