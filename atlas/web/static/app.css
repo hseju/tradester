@@ -248,6 +248,13 @@ h1.big { font: 800 24px/1.15 var(--display); letter-spacing: .04em; margin: 0; }
 .orb span { font: 11px var(--mono); letter-spacing: .18em; color: var(--accent); }
 .badge { position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; padding: 0 4px; background: var(--amber); color: #1A1004; font: 700 11px/18px var(--mono); text-align: center; font-style: normal; }
 
+/* ---- confirmation sheet ---- */
+.sheet-wrap { position: fixed; inset: 0; z-index: 80; background: #010305cc; display: flex; align-items: flex-end; justify-content: center; }
+.sheet { width: 100%; max-width: 520px; background: var(--panel-solid); border-top: 2px solid var(--accent);
+  padding: 18px 16px calc(var(--bottom) + 18px); display: flex; flex-direction: column; gap: 12px; }
+.sheet p { margin: 0; font-size: 17px; }
+.sheet input { min-height: 46px; padding: 0 12px; background: var(--bg); border: 1px solid var(--line); font-size: 16px; }
+
 /* ---- boot ---- */
 .boot { position: fixed; inset: 0; z-index: 60; background: var(--bg-deep); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; font: 12px var(--mono); color: var(--accent); }
 .boot .lines { display: flex; flex-direction: column; gap: 6px; width: 280px; }

@@ -45,6 +45,24 @@ function toast(text) {
   setTimeout(() => t.remove(), 3500);
 }
 
+/* In-page confirmation sheet. Native confirm()/prompt() are blocked in some app views. */
+function ask({ title, body, ok, danger = false, input = null }) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement("div");
+    wrap.className = "sheet-wrap";
+    wrap.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-t">
+      <span class="label" id="sheet-t">${esc(title)}</span><p>${esc(body)}</p>
+      ${input ? `<label class="label" for="sheet-in">${esc(input)}</label><input id="sheet-in" autocomplete="off">` : ""}
+      <div class="grid2"><button class="btn" data-a="no">CANCEL</button>
+      <button class="btn ${danger ? "danger" : "primary"}" data-a="yes">${esc(ok)}</button></div></div>`;
+    const done = (yes) => { wrap.remove(); resolve({ ok: yes, value: yes && input ? wrap.querySelector("#sheet-in").value.trim() : "" }); };
+    wrap.addEventListener("click", (e) => { const a = e.target.closest("[data-a]"); if (a) done(a.dataset.a === "yes"); else if (e.target === wrap) done(false); });
+    wrap.addEventListener("keydown", (e) => { if (e.key === "Escape") done(false); });
+    document.body.appendChild(wrap);
+    (wrap.querySelector("#sheet-in") || wrap.querySelector('[data-a="yes"]')).focus();
+  });
+}
+
 // ---------- api ----------
 class AuthError extends Error {}
 async function api(path, opts = {}) {
@@ -74,6 +92,7 @@ function modeTags(h) {
   const tags = [];
   if (h && h.trading === "paper") tags.push('<span class="tag amber">SIM MODE</span>');
   if (h && h.sample_prices) tags.push('<span class="tag amber">SAMPLE DATA</span>');
+  if (state.session && state.session.demo) tags.push('<span class="tag cyan">DEMO</span>');
   return `<div class="tags">${tags.join("")}</div>`;
 }
 function setNav(view) {
@@ -310,16 +329,17 @@ async function renderPlan(id) {
   document.getElementById("brief").addEventListener("click", () => {
     state.chat.pending = `Brief me on plan ${d.plan_id}: what it does, why, and the risks.`;
   });
-  const act = async (path, confirmText, okText) => {
-    if (!confirm(confirmText)) return;
+  const act = async (path, sheet, okText) => {
+    if (!(await ask(sheet)).ok) return;
     try { await api(path, { method: "POST" }); toast(okText); await refreshHome(); renderPlan(id); }
     catch (e) { if (e instanceof AuthError) return renderLogin(e.message); toast(e.message); }
   };
   if (!done) {
     document.getElementById("auth").addEventListener("click", () => act(`/plans/${encodeURIComponent(id)}/approve`,
-      `Authorize ${open.length} paper order(s)? The Risk Officer checks each one again first.`, "Authorized. Orders sent to the paper broker."));
+      { title: "AUTHORIZE · SIM TRADE", body: `Send ${open.length} paper order(s)? The Risk Officer checks each one again first. No real money moves.`, ok: "AUTHORIZE" },
+      "Authorized. Orders sent to the paper broker."));
     document.getElementById("stand").addEventListener("click", () => act(`/plans/${encodeURIComponent(id)}/dismiss`,
-      "Stand down this plan?", "Stood down."));
+      { title: "STAND DOWN", body: "Drop this plan? The Advisor can propose a new one tomorrow.", ok: "STAND DOWN" }, "Stood down."));
   }
 }
 
@@ -433,9 +453,11 @@ function renderGuard() {
     <button id="out" class="btn">FORGET PASSCODE ON THIS PHONE</button>`;
   const btn = document.getElementById("ks");
   if (btn) btn.addEventListener("click", async () => {
-    let reason = "";
-    if (!ks.engaged) { reason = prompt("Why are you stopping trading? (optional)") ?? null; if (reason === null) return; }
-    else if (!confirm("Release the kill switch and allow trading again?")) return;
+    const answer = ks.engaged
+      ? await ask({ title: "RELEASE KILL SWITCH", body: "Allow trading again? Every trade still needs your approval.", ok: "RELEASE" })
+      : await ask({ title: "ENGAGE KILL SWITCH", body: "Stop all trading now and cancel open orders.", ok: "ENGAGE", danger: true, input: "Reason (optional)" });
+    if (!answer.ok) return;
+    const reason = answer.value;
     try {
       await api("/kill-switch", { method: "POST", body: JSON.stringify({ engaged: !ks.engaged, reason: reason || "engaged from the phone" }) });
       toast(ks.engaged ? "Kill switch released." : "Kill switch ENGAGED. Open orders cancelled.");
@@ -468,7 +490,7 @@ async function route() {
 }
 
 function bootScreen() {
-  if (sessionStorage.getItem("atlas.booted")) return null;
+  try { if (sessionStorage.getItem("atlas.booted")) return null; } catch { return null; }
   try { sessionStorage.setItem("atlas.booted", "1"); } catch { /* ignore */ }
   const el = document.createElement("div");
   el.className = "boot"; el.setAttribute("role", "status"); el.setAttribute("aria-label", "Starting up");
@@ -510,6 +532,8 @@ setInterval(async () => {
   const v = location.hash.replace("#", "") || "home";
   if (v === "home") { try { await refreshHome(); renderHome(); } catch { /* ignore */ } }
 }, 60000);
-if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("/sw.js").catch(() => {});
+try {
+  if ("serviceWorker" in navigator && window.isSecureContext && !window.ATLAS_DEMO) navigator.serviceWorker.register("/sw.js").catch(() => {});
+} catch { /* not available in this view */ }
 boot();
 })();
