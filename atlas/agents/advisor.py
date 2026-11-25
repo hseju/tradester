@@ -345,12 +345,16 @@ class Advisor:
             return [], None  # one plan a day; yours to approve or dismiss
         for p in open_plans:
             self.s.trader.dismiss(p.id, actor=AGENT, reason="superseded by a newer plan")
+        legs = sorted(draft.legs, key=lambda l: l.intent.side != "SELL")  # sells raise the cash buys use
+        tickers = {l.intent.ticker for l in legs}
+        # Cite only reports about this trade: the drift call and breaches on these stocks (not goal checks,
+        # not earlier plan reports).
         support = [r for r in self.s.desk.recent(limit=50)
                    if r.as_of.astimezone(ET).date() == self._today() and r.can_support_trade
-                   and r.agent in {AGENT, "risk_officer"}]
+                   and r.agent in {AGENT, "risk_officer"} and not r.finding.startswith("Proposed")
+                   and (r.subject in tickers or (r.subject == "portfolio" and r.agent == AGENT))]
         if not support:
             return [], None  # no sourced reason on file today -> no proposal
-        legs = sorted(draft.legs, key=lambda l: l.intent.side != "SELL")  # sells raise the cash buys use
         props = self.s.trader.propose_plan([(l.intent, l.rationale) for l in legs], proposed_by=AGENT,
                                            report_ids=[r.id for r in support])
         now = self.books.now()
@@ -361,7 +365,8 @@ class Advisor:
         if blocked:
             finding += f" ({len(blocked)} leg(s) blocked by the Risk Officer)"
         report = self.s.desk.submit(AgentReport(
-            agent=AGENT, as_of=now, subject="portfolio", finding=(finding + ".")[:400],
+            agent=AGENT, as_of=now, subject=next(iter(tickers)) if len(tickers) == 1 else "portfolio",
+            finding=(finding + ".")[:400],
             stance=Stance.TRIM if any(l.intent.side == "SELL" for l in legs) else Stance.ADD,
             confidence=Decimal("0.7"), urgency=Urgency.MEDIUM,
             evidence=[Evidence(claim=l.rationale, source=f"record:proposals/{p.id}") for l, p in zip(legs, props)]

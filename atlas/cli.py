@@ -376,12 +376,80 @@ def cmd_agent(a) -> int:
     return 0
 
 
+def _lan_ip() -> str:
+    """This computer's address on the local network (no packets are sent)."""
+    import socket
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("10.255.255.255", 1))
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+def _ensure_passcode(env_path: Path = Path(".env")) -> tuple[str, bool]:
+    """Use ATLAS_API_TOKEN if set; otherwise create one and save it to .env so it survives restarts."""
+    import os
+    import secrets
+
+    tok = os.environ.get("ATLAS_API_TOKEN")
+    if tok:
+        return tok, False
+    tok = secrets.token_urlsafe(12)
+    lines = env_path.read_text().splitlines() if env_path.exists() else []
+    lines = [ln for ln in lines if not ln.startswith("ATLAS_API_TOKEN=")] + [f"ATLAS_API_TOKEN={tok}"]
+    env_path.write_text("\n".join(lines) + "\n")
+    try:
+        env_path.chmod(0o600)
+    except OSError:
+        pass
+    os.environ["ATLAS_API_TOKEN"] = tok
+    return tok, True
+
+
 def cmd_serve(a) -> int:
     import uvicorn
 
     from atlas.api import create_api
 
-    uvicorn.run(create_api(_app()), host=a.host, port=a.port)
+    app = _app()
+    host = a.host
+    if a.phone:
+        host = "0.0.0.0" if host == "127.0.0.1" else host
+        tok, new = _ensure_passcode()
+        url = f"http://{_lan_ip()}:{a.port}"
+        print("\nAtlas is ready for your phone.")
+        print(f"  1. Put the phone on the same Wi-Fi as this computer.")
+        print(f"  2. Open {url} in Safari (iPhone) or Chrome (Android).")
+        print(f"  3. Passcode: {tok}" + ("   (new - saved to .env)" if new else ""))
+        print(f"     Or open this one-tap link, which signs you in: {url}/#token={tok}")
+        print("  4. Share > Add to Home Screen (iPhone) or menu > Install app (Android).")
+        try:
+            import qrcode  # optional: pip install qrcode
+
+            qr = qrcode.QRCode(border=1)
+            qr.add_data(f"{url}/#token={tok}")
+            print("\n  Or scan this with the phone's camera:")
+            qr.print_ascii(invert=True)
+        except ImportError:
+            pass
+        print("\nKeep this window open while you use Atlas. Ctrl-C stops it.\n")
+    sched = None
+    if a.jobs:
+        from atlas.jobs import build_scheduler
+
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
+        sched = build_scheduler(app, blocking=False)
+        sched.start()
+        print("Scheduled jobs running:", ", ".join(j.id for j in sched.get_jobs()))
+    try:
+        uvicorn.run(create_api(app), host=host, port=a.port, log_level="warning" if a.phone else "info")
+    finally:
+        if sched:
+            sched.shutdown(wait=False)
     return 0
 
 
@@ -506,9 +574,11 @@ def build_parser() -> argparse.ArgumentParser:
     y.add_argument("name", choices=["prices", "market_watch", "morning_scan", "daily_close", "advisor"])
     x.set_defaults(fn=cmd_jobs)
 
-    x = sub.add_parser("serve", help="run the local HTTP API")
+    x = sub.add_parser("serve", help="run the API and the phone app (add --phone to use it from your phone)")
     x.add_argument("--host", default="127.0.0.1")
     x.add_argument("--port", type=int, default=8787)
+    x.add_argument("--phone", action="store_true", help="listen on your Wi-Fi with a passcode, and print the link")
+    x.add_argument("--jobs", action="store_true", help="also run the scheduled jobs (prices, news, Advisor)")
     x.set_defaults(fn=cmd_serve)
     return p
 

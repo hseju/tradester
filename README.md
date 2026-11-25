@@ -1,7 +1,8 @@
-# Atlas — personal AI finance board (phases 1–2)
+# Atlas — personal AI finance board
 
 - **Phase 1** is the foundation from the spec: the **Bookkeeper**, the **Risk Officer**, the **shared report format** and a **text-only Atlas** you can chat with. It also includes a minimal **Trader** that fills approved trades on paper.
 - **Phase 2** adds the first analysts: the **Advisor** (drift, goal pacing, rebalance plans) and **Market Watch** (headlines, the 24-hour pause, why things moved, the week's calendar).
+- **Phone app** (pulled forward from phase 4, text only for now): see [On your phone](#on-your-phone). Voice and the morning/evening briefings are still to come.
 
 Filings Research, Value Research, Tax & Accounts, Savings Coach, Scout and the Auditor come later. They plug into the same report format and the same read-only books.
 
@@ -33,7 +34,7 @@ atlas marketwatch --morning   # news, calendar, Bank of Canada rate, USD/CAD
 atlas advisor         # drift, goal checks, and a rebalance plan for your approval
 atlas plan            # see the plan;  atlas plan approve PLAN_ID
 atlas chat            # talk to Atlas  (or: atlas chat "how are my goals?")
-pytest                # 75 tests
+pytest                # 81 tests
 ```
 
 With no keys, everything runs on **clearly labelled SAMPLE prices**, and the chat uses an offline rule-based responder. Copy `.env.example` to `.env` and add keys to go live:
@@ -46,6 +47,37 @@ With no keys, everything runs on **clearly labelled SAMPLE prices**, and the cha
 | `ANTHROPIC_API_KEY` | Atlas chat on Claude (`claude-opus-5-5`; `atlas chat --engine claude` also picks up an `ant auth login` profile), and Market Watch's headline judgment (structured JSON at low effort; `ATLAS_LLM_SPECIALISTS=0` turns it off) |
 
 Once any market-data key is set, sample prices are never used as a silent fallback. A failed fetch keeps the last real price, and the Bookkeeper flags it as stale.
+
+## On your phone
+
+Atlas's engine runs on your computer. Your phone uses it through a web app built from the mockup (home deck, decision cards, the board, chat, guardrails). You add the app to your home screen and it opens full-screen like a normal app.
+
+**At home, same Wi-Fi:**
+
+```bash
+pip install -e ".[phone]"        # optional extra: prints a QR code to scan
+atlas serve --phone --jobs       # --jobs also runs the price/news/Advisor schedule
+```
+
+1. The command prints an address such as `http://192.168.1.20:8787`, a **passcode**, a one-tap sign-in link and a QR code. The passcode is created once and saved to `.env` as `ATLAS_API_TOKEN`.
+2. On the phone, scan the QR code or open the link in **Safari** (iPhone) or **Chrome** (Android).
+3. Add the app to your home screen: on iPhone, tap **Share → Add to Home Screen**; on Android, tap **⋮ → Install app / Add to Home screen**.
+4. If your computer asks whether Python may accept incoming connections, allow it for private networks.
+
+Leave the command running while you use the app. The computer must be on and awake.
+
+**Away from home:** use [Tailscale](https://tailscale.com) (free for personal use), a private network between your own devices.
+1. Install Tailscale on the computer and the phone, and sign in to both with the same account.
+2. On the computer, run `atlas serve --phone --jobs` and, in a second terminal, `tailscale serve --bg 8787`. Tailscale may ask you once to enable HTTPS for your network.
+3. On the phone, open the `https://<computer-name>.<tailnet>.ts.net` address that Tailscale prints, then add it to your home screen.
+
+Over HTTPS the app shell also loads when you're offline. Your financial data is never cached on the phone.
+
+**Security:**
+- Any request that doesn't come from the computer itself needs the passcode, and so does anything that acts for you (authorize, stand down, kill switch). Requests relayed through Tailscale or another proxy count as remote.
+- Scripts can only come from your own server, and all text from the server is escaped before display, so a headline can't inject code into the page.
+- **Don't** open port 8787 on your router to the whole internet; use Tailscale instead.
+- To sign a phone out, use **Guardrails → Forget passcode on this phone**. To revoke every phone at once, delete `ATLAS_API_TOKEN` from `.env` and restart; a new passcode is generated.
 
 ## The sample book
 
@@ -163,8 +195,8 @@ Reports aren't re-filed on every price tick: each finding goes in once a day unl
 
 Start the scheduler with `atlas jobs start`, or run one job with `atlas jobs run prices`.
 
-### Local API (`atlas serve`)
-FastAPI on `127.0.0.1:8787`, as groundwork for the phone app in phase 4. Read endpoints are open. Write endpoints (proposals, approve, plan approve, kill switch) require `X-Atlas-Token` matching `ATLAS_API_TOKEN` and are disabled when no token is set.
+### API and phone app (`atlas serve`)
+FastAPI on `127.0.0.1:8787` (`--phone` listens on your Wi-Fi). It serves the phone app at `/` and the API next to it; `/docs` lists the endpoints. Reads from the computer itself need no passcode. Everything else needs `X-Atlas-Token` = `ATLAS_API_TOKEN`; see [On your phone](#on-your-phone).
 
 ## Commands
 
