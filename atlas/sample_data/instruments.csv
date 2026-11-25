@@ -1,0 +1,12 @@
+ticker,name,asset_type,sector,ca_equity,us_equity,intl_equity,fixed_income,mer_pct
+XEQT.TO,iShares Core Equity ETF Portfolio,etf,,0.25,0.45,0.30,,0.20
+VEQT.TO,Vanguard All-Equity ETF Portfolio,etf,,0.30,0.43,0.27,,0.24
+VFV.TO,Vanguard S&P 500 Index ETF,etf,,,1,,,0.09
+ZAG.TO,BMO Aggregate Bond Index ETF,etf,,,,,1,0.09
+XBB.TO,iShares Core Canadian Universe Bond Index ETF,etf,,,,,1,0.10
+XEF.TO,iShares Core MSCI EAFE IMI Index ETF,etf,,,,1,,0.22
+XIC.TO,iShares Core S&P/TSX Capped Composite Index ETF,etf,,1,,,,0.06
+RY.TO,Royal Bank of Canada,stock,Financials,1,,,,
+VOO.US,Vanguard S&P 500 ETF,etf,,,1,,,0.03
+AAPL.US,Apple Inc.,stock,Information Technology,,1,,,
+NVDA.US,NVIDIA Corporation,stock,Information Technology,,1,,,

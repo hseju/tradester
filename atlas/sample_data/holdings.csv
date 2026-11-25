@@ -1,0 +1,15 @@
+account_id,account_name,account_type,account_currency,symbol,exchange,quantity,avg_cost,currency,name
+tfsa,TFSA,TFSA,CAD,XEQT,TSX,600,30.10,CAD,iShares Core Equity ETF Portfolio
+tfsa,TFSA,TFSA,CAD,VFV,TSX,60,121.40,CAD,Vanguard S&P 500 Index ETF
+tfsa,TFSA,TFSA,CAD,CASH,,900,,CAD,
+rrsp,RRSP,RRSP,CAD,VOO,NYSE ARCA,12,455.00,USD,Vanguard S&P 500 ETF
+rrsp,RRSP,RRSP,CAD,ZAG,TSX,500,13.90,CAD,BMO Aggregate Bond Index ETF
+rrsp,RRSP,RRSP,CAD,XEF,TSX,150,34.80,CAD,iShares Core MSCI EAFE IMI Index ETF
+rrsp,RRSP,RRSP,CAD,CASH,,600,,CAD,
+rrsp,RRSP,RRSP,CAD,CASH,,300,,USD,
+fhsa,FHSA (house fund),FHSA,CAD,XIC,TSX,120,38.50,CAD,iShares Core S&P/TSX Capped Composite Index ETF
+fhsa,FHSA (house fund),FHSA,CAD,CASH,,2500,,CAD,
+nonreg,Non-registered,NON_REGISTERED,CAD,NVDA,NASDAQ,45,98.00,USD,NVIDIA Corporation
+nonreg,Non-registered,NON_REGISTERED,CAD,AAPL,NASDAQ,18,182.00,USD,Apple Inc.
+nonreg,Non-registered,NON_REGISTERED,CAD,RY,TSX,20,141.00,CAD,Royal Bank of Canada
+nonreg,Non-registered,NON_REGISTERED,CAD,CASH,,1000,,CAD,
